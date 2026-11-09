@@ -732,6 +732,17 @@ class StockAnalysisPipeline:
             else:
                 logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
 
+            # 当无独立搜索服务或未搜到新闻时，尝试通过 Yahoo Finance 获取美股/海外标的资讯
+            if not news_context and (is_us_stock_code(code) or (market and market in ("us", "jp", "hk"))):
+                try:
+                    yf_news_text, yf_count = self._fetch_yfinance_news(code, stock_name)
+                    if yf_news_text:
+                        news_context = yf_news_text
+                        news_result_count = yf_count
+                        logger.info(f"{stock_name}({code}) 通过 Yahoo Finance 获取到 {yf_count} 条最新资讯")
+                except Exception as e:
+                    logger.warning(f"{stock_name}({code}) Yahoo Finance 资讯获取失败: {e}")
+
             # Step 4.5: Social sentiment intelligence (US stocks only)
             social_evidence_context: Optional[str] = None
             if self.social_sentiment_service is not None and self.social_sentiment_service.is_available and is_us_stock_code(code):
@@ -3394,7 +3405,41 @@ class StockAnalysisPipeline:
         finally:
             reset_run_diagnostic_context(diag_token)
             reset_frozen_target_date(token)
-    
+
+    @staticmethod
+    def _fetch_yfinance_news(code: str, stock_name: str) -> tuple[Optional[str], int]:
+        """从 Yahoo Finance 抓取实时资讯，作为无搜索 API Key 时的个股情报补充"""
+        try:
+            import yfinance as yf
+            yf_code = code.replace('.', '-')
+            ticker = yf.Ticker(yf_code)
+            raw_news = ticker.news or []
+            if not raw_news:
+                return None, 0
+            lines = [f"### 【Yahoo Finance 实时资讯】({stock_name} / {code})"]
+            count = 0
+            for item in raw_news[:8]:
+                content = item.get("content") if isinstance(item.get("content"), dict) else item
+                title = content.get("title") or item.get("title")
+                summary = content.get("summary") or item.get("summary")
+                provider = (content.get("provider", {}) or {}).get("displayName") or item.get("publisher", "")
+                pub_date = content.get("pubDate") or item.get("providerPublishTime", "")
+                if title:
+                    count += 1
+                    header = f"- **{title}**"
+                    if provider:
+                        header += f" ({provider})"
+                    if pub_date:
+                        header += f" [{pub_date}]"
+                    lines.append(header)
+                    if summary:
+                        lines.append(f"  摘要: {summary.strip()}")
+            if count > 0:
+                return "\n".join(lines), count
+        except Exception as e:
+            logger.debug(f"Failed to fetch yfinance news for {code}: {e}")
+        return None, 0
+
     def run(
         self,
         stock_codes: Optional[List[str]] = None,

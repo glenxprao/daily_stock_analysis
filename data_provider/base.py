@@ -420,12 +420,13 @@ class BaseFetcher(ABC):
         """
         return None
 
-    def get_sector_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
+    def get_sector_rankings(self, n: int = 5, region: str = "cn") -> Optional[Tuple[List[Dict], List[Dict]]]:
         """
         获取板块涨跌榜
 
         Args:
             n: 返回前n个
+            region: 市场区域 (cn/us)
 
         Returns:
             Tuple: (领涨板块列表, 领跌板块列表)
@@ -4906,8 +4907,26 @@ class DataFetcherManager:
 
             return [], [], source_chain, last_error
 
-    def get_sector_rankings(self, n: int = 5) -> Tuple[List[Dict], List[Dict]]:
+    def get_sector_rankings(self, n: int = 5, region: str = "cn") -> Tuple[List[Dict], List[Dict]]:
         """获取板块涨跌榜（自动切换数据源）"""
+        if region == "us":
+            for fetcher in self._fetchers:
+                if fetcher.name in ("YfinanceFetcher", "YFinanceFetcher"):
+                    try:
+                        res = fetcher.get_sector_rankings(n=n, region=region)
+                        if res and (res[0] or res[1]):
+                            return res
+                    except Exception as e:
+                        logger.warning(f"[{fetcher.name}] 获取美股板块排行失败: {e}")
+            try:
+                from data_provider.yfinance_fetcher import YfinanceFetcher
+                yf_fetcher = YfinanceFetcher()
+                res = yf_fetcher.get_sector_rankings(n=n, region=region)
+                if res and (res[0] or res[1]):
+                    return res
+            except Exception as e:
+                logger.warning(f"[YfinanceFetcher] 获取美股板块排行直接调用失败: {e}")
+            return [], []
         # 按需求固定回退顺序：Akshare(EM) -> Akshare(Sina) -> Tushare -> Efinance
         top, bottom, _, last_error = self._get_sector_rankings_with_meta(n)
         if top or bottom:

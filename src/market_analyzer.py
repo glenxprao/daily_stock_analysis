@@ -569,7 +569,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         # 3. 获取板块涨跌榜（A 股有，美股暂无）
         if self.profile.has_sector_rankings:
             self._get_sector_rankings(overview)
-            self._get_concept_rankings(overview)
+            if self.region == "cn":
+                self._get_concept_rankings(overview)
         
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
@@ -656,7 +657,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         try:
             logger.info("[大盘] %s action=get_sector_rankings status=start", self._log_context())
 
-            top_sectors, bottom_sectors = self.data_manager.get_sector_rankings(5)
+            top_sectors, bottom_sectors = self.data_manager.get_sector_rankings(5, region=self.region)
 
             if top_sectors or bottom_sectors:
                 overview.top_sectors = top_sectors

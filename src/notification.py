@@ -17,6 +17,7 @@ A股自选股智能分析系统 - 通知层
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1252,6 +1253,29 @@ class NotificationService(
             signal_tag,
         )
 
+    @staticmethod
+    def _is_flat_or_sideways(result: AnalysisResult) -> bool:
+        """判断是否为横盘/平稳/现金管理类标的（长线价值投资可折叠简述）"""
+        code = (getattr(result, "code", "") or "").upper().strip()
+        # 纯现金/超短债管理工具等无波动标的
+        if code in ("BOXX", "SGOV", "BIL", "SHV"):
+            return True
+        dashboard = getattr(result, "dashboard", {}) or {}
+        intel = dashboard.get("intelligence", {}) or {}
+        risk_alerts = intel.get("risk_alerts", []) or []
+        # 如果存在风险警报，绝不可作为横盘忽略
+        if risk_alerts:
+            return False
+        advice = (getattr(result, "operation_advice", "") or "").strip()
+        trend = (getattr(result, "trend_prediction", "") or "").strip()
+        chg = getattr(result, "change_pct", None)
+        is_neutral_advice = advice in ("持有", "观望", "hold", "watch", "Continue Holding", "Wait")
+        is_neutral_trend = any(k in trend for k in ("震荡", "横盘", "盘整", "Consolidation", "Range"))
+        is_small_change = (chg is not None and abs(chg) < 0.8) or chg is None
+        score = getattr(result, "sentiment_score", 50)
+        is_neutral_score = 45 <= score <= 60
+        return is_neutral_advice and (is_neutral_trend or is_neutral_score) and is_small_change
+
     def generate_dashboard_report(
         self,
         results: List[AnalysisResult],
@@ -1343,9 +1367,30 @@ class NotificationService(
                 "",
             ])
 
+        is_value_mode = getattr(config, 'value_investing_mode', False) or os.getenv('VALUE_INVESTING_MODE', 'false').lower() in ('true', '1', 'yes')
+
+        focus_results = []
+        flat_results = []
+        if is_value_mode:
+            for r in sorted_results:
+                if self._is_flat_or_sideways(r):
+                    flat_results.append(r)
+                else:
+                    focus_results.append(r)
+            if not focus_results and flat_results:
+                focus_results = flat_results[:3]
+                flat_results = flat_results[3:]
+        else:
+            focus_results = sorted_results
+
         # 逐个股票的决策仪表盘（Issue #262: summary_only 时跳过详情）
         if not self._report_summary_only:
-            for result in sorted_results:
+            if is_value_mode and focus_results and flat_results:
+                report_lines.extend([
+                    f"## 🚨 重点关注 / 有重要动态标的 (共 {len(focus_results)} 只)",
+                    "",
+                ])
+            for result in focus_results:
                 signal_text, signal_emoji, signal_tag = self._get_signal_level(result)
                 dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
 
@@ -1419,7 +1464,7 @@ class NotificationService(
 
                 # ========== 数据透视 ==========
                 data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
-                if data_persp:
+                if data_persp and not is_value_mode:
                     trend_data = data_persp.get('trend_status', {})
                     price_data = data_persp.get('price_position', {})
                     vol_data = data_persp.get('volume_analysis', {})
@@ -1491,7 +1536,7 @@ class NotificationService(
 
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}
-                if battle:
+                if battle and not is_value_mode:
                     report_lines.extend([
                         f"### 🎯 {labels['battle_plan_heading']}",
                         "",
@@ -1532,7 +1577,7 @@ class NotificationService(
 
                 # ========== 信号归因分析 ==========
                 signal_attr = dashboard.get('signal_attribution', {}) if dashboard else {}
-                if signal_attribution_has_content(signal_attr):
+                if signal_attribution_has_content(signal_attr) and not is_value_mode:
                     report_lines.extend([
                         f"### 🎯 {labels['signal_attribution_heading']}",
                         "",
@@ -1582,7 +1627,7 @@ class NotificationService(
                             "",
                         ])
                     # 技术面分析
-                    if result.ma_analysis or result.volume_analysis:
+                    if (result.ma_analysis or result.volume_analysis) and not is_value_mode:
                         report_lines.extend([
                             f"### 📊 {technical_heading}",
                             "",
@@ -1606,6 +1651,31 @@ class NotificationService(
                     report_lines.append("")
 
                 report_lines.extend([
+                    "---",
+                    "",
+                ])
+
+            # 价值投资模式：平稳/横盘资产收纳为精简表格
+            if is_value_mode and flat_results:
+                report_lines.extend([
+                    f"## 💤 走势平稳 / 横盘观望标的 (共 {len(flat_results)} 只)",
+                    "",
+                    "> 以下标的当前处于平稳持有或窄幅整理区间，暂无重大突发消息或风险警报，长线价值投资建议保持持有或观望：",
+                    "",
+                    "| 标的 | 最新价 | 涨跌幅 | 综合评分 | 建议 | 状态概述 |",
+                    "|------|--------|--------|----------|------|----------|",
+                ])
+                for r in flat_results:
+                    d_name = self._get_display_name(r, report_language)
+                    c_price = f"${r.current_price:.2f}" if r.current_price else "N/A"
+                    c_pct = f"{r.change_pct:+.2f}%" if r.change_pct is not None else "0.00%"
+                    c_core = (r.dashboard or {}).get("core_conclusion", {}).get("one_sentence") or r.analysis_summary or "走势平稳，无重大突发消息"
+                    c_core = c_core.replace("|", "/").replace("\n", " ").strip()
+                    report_lines.append(
+                        f"| **{d_name}** ({r.code}) | {c_price} | {c_pct} | {r.sentiment_score} | {r.operation_advice} | {c_core} |"
+                    )
+                report_lines.extend([
+                    "",
                     "---",
                     "",
                 ])

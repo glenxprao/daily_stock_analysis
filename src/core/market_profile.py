@@ -48,9 +48,9 @@ US_PROFILE = MarketProfile(
         "US stock market",
         "S&P 500 NASDAQ",
     ],
-    prompt_index_hint="分析标普500、纳斯达克、道指等各指数走势特点",
+    prompt_index_hint="分析标普500、纳斯达克100、道指等主要指数走势特点，重点分析标普500各行业板块涨跌轮动与资金偏好",
     has_market_stats=False,
-    has_sector_rankings=False,
+    has_sector_rankings=True,
 )
 
 HK_PROFILE = MarketProfile(

@@ -1276,13 +1276,20 @@ def run_full_analysis(
         if merge_notification and (results or market_report) and not args.no_notify:
             parts = []
             if market_report:
-                parts.append(f"# 📈 大盘复盘\n\n{market_report}")
+                mr = market_report.strip()
+                if mr.startswith("#"):
+                    parts.append(mr)
+                else:
+                    parts.append(f"# 📈 大盘复盘\n\n{mr}")
             if results:
                 dashboard_content = pipeline.notifier.generate_aggregate_report(
                     results,
                     getattr(config, 'report_type', 'simple'),
-                )
-                parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
+                ).strip()
+                if dashboard_content.startswith("#"):
+                    parts.append(dashboard_content)
+                else:
+                    parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
             if parts:
                 combined_content = "\n\n---\n\n".join(parts)
                 if pipeline.notifier.is_available():

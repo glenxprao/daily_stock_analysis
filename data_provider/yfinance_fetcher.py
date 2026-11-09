@@ -18,7 +18,7 @@ import csv
 import logging
 from datetime import datetime
 from io import StringIO
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -400,8 +400,8 @@ class YfinanceFetcher(BaseFetcher):
 
     def _get_us_main_indices(self, yf) -> Optional[List[Dict[str, Any]]]:
         """获取美股主要指数行情（SPX、IXIC、DJI、VIX），复用 _fetch_yf_ticker_data"""
-        # 大盘复盘所需核心美股指数
-        us_indices = ['SPX', 'IXIC', 'DJI', 'VIX']
+        # 大盘复盘所需核心美股指数（重点标普500与纳斯达克100）
+        us_indices = ['SPX', 'NDX', 'DJI', 'VIX']
         results = []
         try:
             for code in us_indices:
@@ -941,7 +941,56 @@ class YfinanceFetcher(BaseFetcher):
             if self._is_us_stock(stock_code):
                 logger.warning(f"[Yfinance] 获取美股 {stock_code} 实时行情失败: {e}，尝试 Stooq 兜底")
                 return self._get_us_stock_quote_from_stooq(stock_code)
-            logger.warning(f"[Yfinance] 获取 {stock_code} 实时行情失败: {e}")
+            return None
+
+    def get_sector_rankings(self, n: int = 5, region: str = "us") -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
+        """
+        获取美股标普500各行业板块（SPDR Sector ETFs）涨跌榜
+        """
+        if region != "us":
+            return None
+        import yfinance as yf
+        sector_mapping = {
+            'XLK': '信息科技 (Technology)',
+            'XLF': '金融 (Financials)',
+            'XLV': '医疗健康 (Health Care)',
+            'XLY': '可选消费 (Consumer Discretionary)',
+            'XLC': '通信服务 (Communication Services)',
+            'XLI': '工业 (Industrials)',
+            'XLP': '必需消费 (Consumer Staples)',
+            'XLE': '能源 (Energy)',
+            'XLRE': '房地产 (Real Estate)',
+            'XLB': '原材料 (Materials)',
+            'XLU': '公用事业 (Utilities)',
+        }
+        try:
+            tickers = yf.Tickers(" ".join(sector_mapping.keys()))
+            items = []
+            for sym, name in sector_mapping.items():
+                try:
+                    t = tickers.tickers[sym]
+                    fi = t.fast_info
+                    last = getattr(fi, 'last_price', None) or getattr(fi, 'regular_market_price', None)
+                    prev = getattr(fi, 'previous_close', None) or getattr(fi, 'regular_market_previous_close', None)
+                    if last is not None and prev and prev > 0:
+                        chg_pct = (last - prev) / prev * 100
+                    else:
+                        chg_pct = 0.0
+                    items.append({
+                        'code': sym,
+                        'name': name,
+                        'current': round(float(last), 2) if last is not None else 0.0,
+                        'change_pct': round(float(chg_pct), 2),
+                    })
+                except Exception as e:
+                    logger.debug(f"[Yfinance] 获取行业 ETF {sym} 失败: {e}")
+            if not items:
+                return None
+            items.sort(key=lambda x: x['change_pct'], reverse=True)
+            top_sectors = items[:n]
+            bottom_sectors = sorted(items[-n:], key=lambda x: x['change_pct'])
+            return top_sectors, bottom_sectors
+        except Exception as e:
             return None
 
 

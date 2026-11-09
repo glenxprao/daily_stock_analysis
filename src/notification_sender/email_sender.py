@@ -163,7 +163,12 @@ class EmailSender:
             # 生成主题
             if subject is None:
                 date_str = datetime.now().strftime('%Y-%m-%d')
-                subject = f"📈 股票智能分析报告 - {date_str}"
+                first_line = content.strip().split('\n')[0]
+                if first_line.startswith('# '):
+                    heading_text = first_line.lstrip('# ').strip()
+                    subject = f"📈 {heading_text} - {date_str}"
+                else:
+                    subject = f"📈 股票智能分析报告 - {date_str}"
 
             sanitized_content = strip_hidden_markdown_metadata(content).strip()
             

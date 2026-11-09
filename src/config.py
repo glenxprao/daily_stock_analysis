@@ -1260,6 +1260,9 @@ class Config:
     # Merge stock + market report into one notification (Issue #190)
     merge_email_notification: bool = False
 
+    # 价值投资模式：精简短期技术面指标（均线乖离、狙击点位），突出新闻情报与基本面逻辑，横盘/平稳标的收纳汇总
+    value_investing_mode: bool = False
+
     # 消息长度限制（字节）- 超长自动分批发送
     feishu_max_bytes: int = 20000  # 飞书限制约 20KB，默认 20000 字节
     feishu_send_as_file: bool = False  # 飞书是否以文件形式发送报告（默认文字消息）
@@ -2239,6 +2242,7 @@ class Config:
             report_history_compare_n=parse_env_int(os.getenv('REPORT_HISTORY_COMPARE_N'), 0, field_name='REPORT_HISTORY_COMPARE_N', minimum=0),
             analysis_delay=parse_env_float(os.getenv('ANALYSIS_DELAY'), 0.0, field_name='ANALYSIS_DELAY', minimum=0.0),
             merge_email_notification=os.getenv('MERGE_EMAIL_NOTIFICATION', 'false').lower() == 'true',
+            value_investing_mode=os.getenv('VALUE_INVESTING_MODE', 'false').lower() in ('true', '1', 'yes'),
             feishu_max_bytes=parse_env_int(os.getenv('FEISHU_MAX_BYTES'), 20000, field_name='FEISHU_MAX_BYTES', minimum=1),
             feishu_send_as_file=os.getenv('FEISHU_SEND_AS_FILE', '').lower() in ('true', '1', 'yes'),
             wechat_max_bytes=wechat_max_bytes,
