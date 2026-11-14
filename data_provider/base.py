@@ -433,6 +433,18 @@ class BaseFetcher(ABC):
         """
         return None
 
+    def get_commodities(self, region: str = "us") -> Optional[List[Dict[str, Any]]]:
+        """
+        获取大宗商品/避险资产行情（如国际黄金 COMEX）
+
+        Args:
+            region: 市场区域 (如 us)
+
+        Returns:
+            List[Dict]: 商品行情列表
+        """
+        return None
+
     def get_concept_rankings(self, n: int = 5) -> Optional[Tuple[List[Dict], List[Dict]]]:
         """
         获取概念/题材涨跌榜。
@@ -4933,6 +4945,31 @@ class DataFetcherManager:
             return top, bottom
         logger.warning(f"[板块排行] 所有数据源均失败，最终错误: {last_error}")
         return [], []
+
+    def get_commodities(self, region: str = "us") -> List[Dict[str, Any]]:
+        """获取大宗商品/避险资产行情（自动切换数据源）"""
+        if region != "us":
+            return []
+        tried_yf = False
+        for fetcher in self._fetchers:
+            if fetcher.name in ("YfinanceFetcher", "YFinanceFetcher"):
+                tried_yf = True
+                try:
+                    res = fetcher.get_commodities(region=region)
+                    if res:
+                        return res
+                except Exception as e:
+                    logger.warning(f"[{fetcher.name}] 获取大宗商品行情失败: {e}")
+        if not tried_yf:
+            try:
+                from data_provider.yfinance_fetcher import YfinanceFetcher
+                yf_fetcher = YfinanceFetcher()
+                res = yf_fetcher.get_commodities(region=region)
+                if res:
+                    return res
+            except Exception as e:
+                logger.warning(f"[YfinanceFetcher] 获取大宗商品行情直接调用失败: {e}")
+        return []
 
     @staticmethod
     def _copy_ranking_rows(rows: List[Dict]) -> List[Dict]:

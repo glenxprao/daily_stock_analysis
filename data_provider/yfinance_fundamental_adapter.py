@@ -28,6 +28,7 @@ mark the block as ``partial`` when only some fields are populated.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -142,6 +143,8 @@ def _convert_to_yf_symbol(stock_code: str) -> str:
         digits = code[2:].lstrip("0") or "0"
         return f"{digits.zfill(4)}.HK"
     if "." in code:
+        if re.match(r"^[A-Z]{1,5}\.[A-Z]$", code):
+            return code.replace(".", "-")
         return code
     # Assume US ticker by default for non-HK / non-CN callers
     return code

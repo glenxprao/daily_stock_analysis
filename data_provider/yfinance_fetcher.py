@@ -94,6 +94,14 @@ class YfinanceFetcher(BaseFetcher):
         """
         return is_suffix_market_symbol(stock_code, "tw")
 
+    @staticmethod
+    def _to_yf_ticker_symbol(symbol: str) -> str:
+        """Translate US dotted share classes (e.g. BRK.B) to Yahoo Finance hyphenated tickers (BRK-B)."""
+        code = (symbol or "").strip().upper()
+        if is_us_stock_code(code) and "." in code:
+            return code.replace(".", "-")
+        return code
+
     def _convert_stock_code(self, stock_code: str) -> str:
         """
         转换股票代码为 Yahoo Finance 格式
@@ -202,13 +210,14 @@ class YfinanceFetcher(BaseFetcher):
 
         # 转换代码格式
         yf_code = self._convert_stock_code(stock_code)
+        download_symbol = self._to_yf_ticker_symbol(yf_code)
 
-        logger.debug(f"调用 yfinance.download({yf_code}, {start_date}, {end_date})")
+        logger.debug(f"调用 yfinance.download({download_symbol}, {start_date}, {end_date})")
 
         try:
             # 使用 yfinance 下载数据
             df = yf.download(
-                tickers=yf_code,
+                tickers=download_symbol,
                 start=start_date,
                 end=end_date,
                 progress=False,  # 禁止进度条
@@ -216,10 +225,10 @@ class YfinanceFetcher(BaseFetcher):
                 multi_level_index=True
             )
 
-            # 筛选出 yf_code 的列, 避免多只股票数据混淆
+            # 筛选出 yf_code 或 download_symbol 的列, 避免多只股票数据混淆
             if isinstance(df.columns, pd.MultiIndex) and len(df.columns) > 1:
                 ticker_level = df.columns.get_level_values(1)
-                mask = ticker_level == yf_code
+                mask = (ticker_level == download_symbol) | (ticker_level == yf_code)
                 if mask.any():
                     df = df.loc[:, mask].copy()
 
@@ -829,9 +838,10 @@ class YfinanceFetcher(BaseFetcher):
             symbol = self._convert_stock_code(stock_code)
             is_us_symbol = self._is_us_stock(symbol)
             suffix_market = get_suffix_market(symbol)
-            logger.debug(f"[Yfinance] 获取 {symbol} 实时行情")
+            yf_ticker_symbol = self._to_yf_ticker_symbol(symbol)
+            logger.debug(f"[Yfinance] 获取 {symbol} (ticker: {yf_ticker_symbol}) 实时行情")
 
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(yf_ticker_symbol)
 
             # 尝试获取 fast_info（更快，但字段较少）
             try:
@@ -991,6 +1001,81 @@ class YfinanceFetcher(BaseFetcher):
             bottom_sectors = sorted(items[-n:], key=lambda x: x['change_pct'])
             return top_sectors, bottom_sectors
         except Exception as e:
+            return None
+
+    def get_commodities(self, region: str = "us") -> Optional[List[Dict[str, Any]]]:
+        """
+        获取大宗商品/避险资产行情（COMEX 黄金期货 GC=F）。
+
+        Args:
+            region: 市场区域 (仅 us 支持)
+
+        Returns:
+            List[Dict] 包含黄金行情指标，失败返回 None
+        """
+        if region != "us":
+            return None
+        import yfinance as yf
+
+        try:
+            logger.debug("[Yfinance] 获取国际黄金 (COMEX GC=F) 行情数据")
+            ticker = yf.Ticker("GC=F")
+            hist = ticker.history(period="1mo")
+            if hist is None or hist.empty:
+                logger.warning("[Yfinance] 无法获取 GC=F 历史行情")
+                return None
+            df = hist.dropna(subset=["Close"])
+            if df.empty:
+                logger.warning("[Yfinance] GC=F 历史行情有效数据为空")
+                return None
+
+            today = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else today
+
+            price = float(today["Close"])
+            prev_close = float(prev["Close"])
+            change = price - prev_close
+            change_pct = (change / prev_close) * 100 if prev_close > 0 else 0.0
+
+            open_price = float(today["Open"])
+            high = float(today["High"])
+            low = float(today["Low"])
+            amplitude = ((high - low) / prev_close) * 100 if prev_close > 0 else 0.0
+
+            change_5d_pct = None
+            if len(df) >= 6:
+                c5 = float(df.iloc[-6]["Close"])
+                if c5 > 0:
+                    change_5d_pct = ((price - c5) / c5) * 100
+
+            recent_20 = df.tail(20)
+            high_20d = float(recent_20["High"].max()) if not recent_20.empty else None
+            low_20d = float(recent_20["Low"].min()) if not recent_20.empty else None
+            ma20 = float(recent_20["Close"].mean()) if not recent_20.empty else None
+
+            item = {
+                "code": "GOLD",
+                "symbol": "GC=F",
+                "name": "国际黄金 (COMEX)",
+                "name_en": "Gold Futures (COMEX)",
+                "current": round(price, 2),
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "open": round(open_price, 2),
+                "high": round(high, 2),
+                "low": round(low, 2),
+                "prev_close": round(prev_close, 2),
+                "amplitude": round(amplitude, 2),
+                "change_5d_pct": round(change_5d_pct, 2) if change_5d_pct is not None else None,
+                "high_20d": round(high_20d, 2) if high_20d is not None else None,
+                "low_20d": round(low_20d, 2) if low_20d is not None else None,
+                "ma20": round(ma20, 2) if ma20 is not None else None,
+                "unit": "USD/oz",
+            }
+            logger.info(f"[Yfinance] 获取国际黄金成功: 现价={price:.2f} 涨跌={change_pct:+.2f}%")
+            return [item]
+        except Exception as e:
+            logger.warning(f"[Yfinance] 获取国际黄金行情失败: {e}")
             return None
 
 

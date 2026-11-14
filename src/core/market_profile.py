@@ -25,6 +25,8 @@ class MarketProfile:
     has_market_stats: bool
     # 市场概况是否包含板块涨跌（A 股有，美股暂无）
     has_sector_rankings: bool
+    # 市场概况是否包含大宗商品/黄金（美股市场有）
+    has_commodities: bool = False
 
 
 CN_PROFILE = MarketProfile(
@@ -47,10 +49,12 @@ US_PROFILE = MarketProfile(
         "美股 大盘",
         "US stock market",
         "S&P 500 NASDAQ",
+        "gold price COMEX market",
     ],
-    prompt_index_hint="分析标普500、纳斯达克100、道指等主要指数走势特点，重点分析标普500各行业板块涨跌轮动与资金偏好",
+    prompt_index_hint="分析标普500、纳斯达克100、道指等主要指数走势特点，结合国际黄金等避险资产风向，重点分析标普500各行业板块涨跌轮动与资金偏好",
     has_market_stats=False,
     has_sector_rankings=True,
+    has_commodities=True,
 )
 
 HK_PROFILE = MarketProfile(

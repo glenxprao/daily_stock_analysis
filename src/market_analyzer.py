@@ -42,18 +42,22 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_ANALYZER_BACKEND_ID = "legacy_analyzer"
 
+_HEADING_PREFIX_RE = r"(?m)^###[ \t]*(?:[^\w\u4e00-\u9fff\r\n#]+[ \t]*)*"
+
 _ENGLISH_SECTION_PATTERNS = {
-    "market_summary": r"###\s*(?:1\.\s*)?Market Summary",
-    "index_commentary": r"###\s*(?:2\.\s*)?(?:Index Commentary|Major Indices)",
-    "sector_highlights": r"###\s*(?:4\.\s*)?(?:Sector Highlights|Sector/Theme Highlights)",
+    "market_summary": _HEADING_PREFIX_RE + r"(?:1\.\s*)?Market Summary",
+    "index_commentary": _HEADING_PREFIX_RE + r"(?:2\.\s*)?(?:Index Commentary|Major Indices)",
+    "sector_highlights": _HEADING_PREFIX_RE + r"(?:[34]\.\s*)?(?:Sector Highlights|Sector/Theme Highlights)",
+    "commodities": _HEADING_PREFIX_RE + r"(?:[45]\.\s*)?(?:International Gold|Commodities|Gold & Safe-Haven|Safe-Haven)",
 }
 
 _CHINESE_SECTION_PATTERNS = {
-    "market_summary": r"###\s*一、(?:盘面总览|市场总结)",
-    "index_commentary": r"###\s*二、(?:指数结构|指数点评|主要指数)",
-    "sector_highlights": r"###\s*三、(?:板块主线|热点解读|板块表现)",
-    "funds_sentiment": r"###\s*四、(?:资金与情绪|资金动向)",
-    "news_catalysts": r"###\s*五、(?:消息催化|后市展望)",
+    "market_summary": _HEADING_PREFIX_RE + r"一、\s*(?:盘面总览|市场总结)",
+    "index_commentary": _HEADING_PREFIX_RE + r"二、\s*(?:指数结构|指数点评|主要指数)",
+    "sector_highlights": _HEADING_PREFIX_RE + r"三、\s*(?:板块主线|热点解读|板块表现)",
+    "commodities": _HEADING_PREFIX_RE + r"[三四五]、\s*(?:国际黄金|黄金走势|黄金与避险|大宗商品)",
+    "funds_sentiment": _HEADING_PREFIX_RE + r"[四五]、\s*(?:资金与情绪|资金动向)",
+    "news_catalysts": _HEADING_PREFIX_RE + r"[四五六]、\s*(?:消息催化|后市展望)",
 }
 
 
@@ -107,6 +111,7 @@ class MarketOverview:
     bottom_sectors: List[Dict] = field(default_factory=list)  # 跌幅前5板块
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
+    commodities: List[Dict[str, Any]] = field(default_factory=list) # 大宗商品/黄金行情
 
 
 @dataclass
@@ -572,8 +577,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             if self.region == "cn":
                 self._get_concept_rankings(overview)
         
-        # 4. 获取北向资金（可选）
-        # self._get_north_flow(overview)
+        # 4. 获取大宗商品/避险资产行情（美股市场有）
+        if getattr(self.profile, "has_commodities", False):
+            self._get_commodities(overview)
         
         return overview
 
@@ -697,6 +703,28 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         except Exception as e:
             logger.warning("[大盘] %s action=get_concept_rankings status=failed error=%s", self._log_context(), e)
+
+    def _get_commodities(self, overview: MarketOverview):
+        """获取大宗商品/避险资产行情（fail-open）"""
+        try:
+            logger.info("[大盘] %s action=get_commodities status=start", self._log_context())
+            raw_items = self.data_manager.get_commodities(region=self.region)
+            if isinstance(raw_items, list):
+                valid_items = [
+                    item for item in raw_items
+                    if isinstance(item, dict) and item.get("name")
+                ]
+                if valid_items:
+                    overview.commodities = valid_items
+                    logger.info(
+                        "[大盘] %s action=get_commodities status=success count=%d",
+                        self._log_context(),
+                        len(valid_items),
+                    )
+                    return
+            logger.warning("[大盘] %s action=get_commodities status=empty", self._log_context())
+        except Exception as e:
+            logger.warning("[大盘] %s action=get_commodities status=failed error=%s", self._log_context(), e)
     
     # def _get_north_flow(self, overview: MarketOverview):
     #     """获取北向资金流入"""
@@ -731,6 +759,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 "[大盘] %s action=search_market_news status=skipped reason=no_search_service",
                 self._log_context(),
             )
+            if self.region == "us":
+                return self._fetch_us_yfinance_market_news()
             return []
         
         all_news = []
@@ -775,7 +805,55 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         except Exception as e:
             logger.error("[大盘] %s action=search_market_news status=failed error=%s", self._log_context(), e)
         
+        if not all_news and self.region == "us":
+            all_news = self._fetch_us_yfinance_market_news()
+
         return all_news
+
+    def _fetch_us_yfinance_market_news(self) -> List[Dict]:
+        """Fetch US macro and gold news directly from Yahoo Finance (fail-open fallback)."""
+        news_items: List[Dict] = []
+        try:
+            import yfinance as yf
+            symbols = ["^GSPC", "GLD"]
+            for sym in symbols:
+                try:
+                    t = yf.Ticker(sym)
+                    raw_news = getattr(t, "news", None) or []
+                    for item in raw_news[:5]:
+                        content = item.get("content", {}) if isinstance(item.get("content"), dict) else item
+                        title = content.get("title") or item.get("title") or ""
+                        summary = content.get("summary") or item.get("summary") or content.get("snippet") or ""
+                        pub_date = content.get("pubDate") or item.get("providerPublishTime") or ""
+                        url = (
+                            content.get("canonicalUrl", {}).get("url")
+                            if isinstance(content.get("canonicalUrl"), dict)
+                            else (content.get("url") or item.get("link") or "")
+                        )
+                        provider = (
+                            content.get("provider", {}).get("displayName")
+                            if isinstance(content.get("provider"), dict)
+                            else (item.get("publisher") or "Yahoo Finance")
+                        )
+                        if title:
+                            news_items.append({
+                                "title": title,
+                                "snippet": summary,
+                                "source": provider,
+                                "published_date": str(pub_date),
+                                "url": url or "",
+                            })
+                except Exception as sym_err:
+                    logger.debug("[大盘] %s yfinance news for %s failed: %s", self._log_context(), sym, sym_err)
+            if news_items:
+                logger.info(
+                    "[大盘] %s action=fetch_us_yfinance_news status=success count=%d",
+                    self._log_context(),
+                    len(news_items),
+                )
+        except Exception as exc:
+            logger.debug("[大盘] %s _fetch_us_yfinance_market_news failed: %s", self._log_context(), exc)
+        return news_items
     
     def generate_market_review(self, overview: MarketOverview, news: List) -> str:
         """
@@ -1055,6 +1133,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if light is not None:
             payload["market_light"] = light
 
+        if getattr(self.profile, "has_commodities", False) or overview.commodities:
+            payload["commodities"] = list(overview.commodities or [])
+
         if has_breadth_data:
             payload["breadth"] = {
                 "up_count": overview.up_count,
@@ -1138,6 +1219,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         stats_block = self._build_stats_block(overview)
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview)
+        commodities_block = self._build_commodities_block(overview)
         patterns = (
             _ENGLISH_SECTION_PATTERNS
             if self._get_review_language() == "en"
@@ -1172,6 +1254,21 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                     else "### 三、板块主线"
                 )
                 review = f"{review.rstrip()}\n\n{fallback_heading}\n{sector_block}\n"
+
+        if commodities_block:
+            original_review = review
+            review = self._insert_after_section(
+                review,
+                patterns["commodities"],
+                commodities_block,
+            )
+            if review == original_review and commodities_block not in review:
+                fallback_heading = (
+                    "### 4. International Gold & Safe-Haven"
+                    if self._get_review_language() == "en"
+                    else "### 四、国际黄金走势"
+                )
+                review = f"{review.rstrip()}\n\n{fallback_heading}\n{commodities_block}\n"
 
         return review
 
@@ -1421,6 +1518,85 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             append_ranking("#### 概念板块领跌 Top 5", "概念板块", overview.bottom_concepts)
         return "\n".join(lines)
 
+    def _build_commodities_block(self, overview: MarketOverview) -> str:
+        """构建大宗商品/黄金行情表格"""
+        if not overview.commodities:
+            return ""
+        language = self._get_review_language()
+        lines = []
+        if language == "en":
+            lines.extend([
+                "#### International Gold & Safe-Haven Assets",
+                "| Asset | Last | Daily % | 5D % | Day Range (Amp) | 20D Range | 20D MA |",
+                "|-------|------|---------|------|-----------------|-----------|--------|",
+            ])
+            for item in overview.commodities:
+                name = item.get("name_en") or item.get("name", "-")
+                last = self._format_optional_number(item.get("current"))
+                unit = item.get("unit", "")
+                last_str = f"{last} {unit}".strip() if last != "N/A" else "N/A"
+                chg_pct = item.get("change_pct", 0.0)
+                arrow = self._get_index_change_arrow(chg_pct)
+                daily_pct_str = f"{arrow} {chg_pct:+.2f}%"
+                chg_5d = item.get("change_5d_pct")
+                chg_5d_str = f"{chg_5d:+.2f}%" if chg_5d is not None else "N/A"
+                low = item.get("low")
+                high = item.get("high")
+                amp = item.get("amplitude")
+                day_range = (
+                    f"{low:.2f} - {high:.2f} ({amp:.2f}%)"
+                    if (low is not None and high is not None and amp is not None)
+                    else "N/A"
+                )
+                low_20d = item.get("low_20d")
+                high_20d = item.get("high_20d")
+                range_20d = (
+                    f"{low_20d:.2f} - {high_20d:.2f}"
+                    if (low_20d is not None and high_20d is not None)
+                    else "N/A"
+                )
+                ma20 = self._format_optional_number(item.get("ma20"))
+                lines.append(
+                    f"| {name} | {last_str} | {daily_pct_str} | {chg_5d_str} | {day_range} | {range_20d} | {ma20} |"
+                )
+        else:
+            lines.extend([
+                "#### 国际黄金与避险资产",
+                "| 品种 | 最新价 | 日涨跌幅 | 5日涨跌幅 | 今日区间（振幅） | 20日区间 | 20日均线 |",
+                "|------|--------|----------|-----------|------------------|----------|----------|",
+            ])
+            for item in overview.commodities:
+                name = item.get("name", "-")
+                last = self._format_optional_number(item.get("current"))
+                unit = item.get("unit", "")
+                unit_zh = "美元/盎司" if unit == "USD/oz" else unit
+                last_str = f"{last} {unit_zh}".strip() if last != "N/A" else "N/A"
+                chg_pct = item.get("change_pct", 0.0)
+                arrow = self._get_index_change_arrow(chg_pct)
+                daily_pct_str = f"{arrow} {chg_pct:+.2f}%"
+                chg_5d = item.get("change_5d_pct")
+                chg_5d_str = f"{chg_5d:+.2f}%" if chg_5d is not None else "N/A"
+                low = item.get("low")
+                high = item.get("high")
+                amp = item.get("amplitude")
+                day_range = (
+                    f"{low:.2f} - {high:.2f} ({amp:.2f}%)"
+                    if (low is not None and high is not None and amp is not None)
+                    else "N/A"
+                )
+                low_20d = item.get("low_20d")
+                high_20d = item.get("high_20d")
+                range_20d = (
+                    f"{low_20d:.2f} - {high_20d:.2f}"
+                    if (low_20d is not None and high_20d is not None)
+                    else "N/A"
+                )
+                ma20 = self._format_optional_number(item.get("ma20"))
+                lines.append(
+                    f"| {name} | {last_str} | {daily_pct_str} | {chg_5d_str} | {day_range} | {range_20d} | {ma20} |"
+                )
+        return "\n".join(lines)
+
     def _build_news_block(self, news: List) -> str:
         """Build a compact source-aware news catalyst list for the rendered report."""
         if not news:
@@ -1611,6 +1787,10 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 sections.append(f"""### {section_number}. Sector Highlights
 (Analyze only the provided industry-sector and concept/theme rankings.)""")
                 section_number += 1
+            if getattr(self.profile, "has_commodities", False):
+                sections.append(f"""### {section_number}. International Gold & Safe-Haven
+(Analyze international gold COMEX price action, safe-haven flows, and macroeconomic implications.)""")
+                section_number += 1
             sections.extend([
                 f"""### {section_number}. News Catalysts
 (Connect recent news to index price action and macro/external-market clues. Do not infer unsupported breadth, fund-flow, or sector-ranking data.)""",
@@ -1650,6 +1830,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
         if self.profile.has_sector_rankings:
             add_section("板块主线", "（仅分析已提供的行业板块与概念题材榜单，不扩展未提供的数据）")
+        if getattr(self.profile, "has_commodities", False):
+            add_section("国际黄金与避险风向", "（结合COMEX黄金期货最新走势与关键点位，分析避险情绪与流动性预期对美股的影响）")
         if self.profile.has_market_stats:
             add_section("资金与情绪", "（仅解读已提供的成交额、涨跌停结构、市场宽度和风险偏好数据）")
         add_section(
@@ -1742,6 +1924,24 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
             if data_limit_lines:
                 data_limits_block = "## 数据边界\n" + "\n".join(data_limit_lines)
 
+        # 大宗商品/黄金信息
+        commodities_data_block = ""
+        if getattr(self.profile, "has_commodities", False) and overview.commodities:
+            commodities_lines = []
+            for item in overview.commodities:
+                name = item.get("name_en") if review_language == "en" else item.get("name")
+                cur = item.get("current")
+                unit = item.get("unit", "")
+                chg = item.get("change_pct", 0.0)
+                direction = "↑" if chg > 0 else "↓" if chg < 0 else "-"
+                chg_5d = item.get("change_5d_pct")
+                chg_5d_text = f", 5D: {chg_5d:+.2f}%" if chg_5d is not None else ""
+                commodities_lines.append(f"- {name}: {cur} {unit} ({direction}{abs(chg):.2f}%{chg_5d_text})")
+            if review_language == "en":
+                commodities_data_block = "## International Gold & Commodities\n" + "\n".join(commodities_lines)
+            else:
+                commodities_data_block = "## 国际黄金与避险资产\n" + "\n".join(commodities_lines)
+
         data_no_indices_hint = (
             "注意：由于行情数据获取失败，请主要根据【市场新闻】进行定性分析和总结，不要编造具体的指数点位。"
             if not indices_text
@@ -1816,6 +2016,8 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 
 {sector_block}
 
+{commodities_data_block}
+
 {data_limits_block}
 
 ## Market News
@@ -1869,6 +2071,8 @@ Output the report content directly, no extra commentary.
 {stats_block}
 
 {sector_block}
+
+{commodities_data_block}
 
 {data_limits_block}
 
@@ -1958,6 +2162,14 @@ Output the report content directly, no extra commentary.
 - **Concept Leaders**: {top_concept_text or "N/A"}
 - **Concept Laggards**: {bottom_concept_text or "N/A"}
 """
+            commodities_section = ""
+            if getattr(self.profile, "has_commodities", False) and overview.commodities:
+                commodities_block = self._build_commodities_block(overview)
+                if commodities_block:
+                    commodities_section = f"""
+### 4. International Gold & Safe-Haven
+{commodities_block}
+"""
             market_names = {
                 "us": "US Market Recap",
                 "hk": "HK Market Recap",
@@ -1974,6 +2186,7 @@ Today's {self._get_market_scope_name(template_language)} showed **{market_mood}*
 {indices_text or "- No index data available"}
 {stats_section}
 {sector_section}
+{commodities_section}
 ### 5. Risk Alerts
 Market conditions can change quickly. The data above is for reference only and does not constitute investment advice.
 
@@ -1993,6 +2206,19 @@ Market conditions can change quickly. The data above is for reference only and d
         )
         indices_block = self._build_indices_block(overview)
         sector_block = self._build_sector_block(overview) if self.profile.has_sector_rankings else ""
+        commodities_block = (
+            self._build_commodities_block(overview)
+            if getattr(self.profile, "has_commodities", False)
+            else ""
+        )
+        commodities_section = (
+            f"""
+### 四、国际黄金与避险风向
+{commodities_block}
+"""
+            if commodities_block
+            else ""
+        )
         summary_focus = (
             "指数承接、成交额变化和板块持续性"
             if self.profile.has_market_stats and self.profile.has_sector_rankings
@@ -2033,6 +2259,7 @@ Market conditions can change quickly. The data above is for reference only and d
 ### 二、指数结构
 {indices_block or indices_text or "暂无指数数据。"}
 {sector_section}
+{commodities_section}
 {funds_section}
 
 ### 五、消息催化
